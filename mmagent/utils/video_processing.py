@@ -78,6 +78,21 @@ def extract_frames(video, start_time=None, interval=None, sample_fps=10):
         
     return frames
 
+def get_video_base64_without_audio(video_path):
+    """Extract video without audio track and return as base64. Used for GPT which cannot process audio."""
+    video = VideoFileClip(video_path)
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+        tmp_path = tmp.name
+    try:
+        video.without_audio().write_videofile(tmp_path, codec="libx264", audio=False, logger=None)
+        video.close()
+        with open(tmp_path, "rb") as f:
+            return base64.b64encode(f.read())
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
 # TODO: check if there is a better way to do this without repeatedly opening and closing the video file
 def process_video_clip(video_path, fps=5, audio_fps=16000): 
     try: 

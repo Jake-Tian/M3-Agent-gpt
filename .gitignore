@@ -1,6 +1,11 @@
 videos
 memory_graphs
 intermediate_outputs
+
+# Ignore all in data/ except annotations/
+data/*
+!data/annotations/
+!data/annotations/**
 __pycache__
 idl
 speakerlab

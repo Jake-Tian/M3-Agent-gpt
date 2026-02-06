@@ -22,7 +22,8 @@ from mmagent.videograph import VideoGraph
 from mmagent.utils.video_processing import process_video_clip
 from mmagent.face_processing import process_faces
 from mmagent.voice_processing import process_voices
-from mmagent.memory_processing_qwen import process_memories, generate_memories
+from mmagent.memory_processing_gpt import process_memories, generate_memories
+from mmagent.utils.token_monitor import get_monitor, save_tokens
 
 logger = logging.getLogger(__name__)
 processing_config = json.load(open("configs/processing_config.json"))
@@ -37,10 +38,11 @@ def process_segment(
     base64_audio,
     clip_id,
     sample,
-    clip_path
+    clip_path,
+    video_id=None,
 ):
     save_path = sample["intermediate_outputs"]
-    
+
     id2voices = process_voices(
         video_graph,
         base64_audio,
@@ -61,10 +63,11 @@ def process_segment(
         id2faces,
         id2voices,
         clip_path,
+        video_id=video_id,
     )
 
-    process_memories(video_graph, episodic_memories, clip_id, type="episodic")
-    process_memories(video_graph, semantic_memories, clip_id, type="semantic")
+    process_memories(video_graph, episodic_memories, clip_id, type="episodic", video_id=video_id)
+    process_memories(video_graph, semantic_memories, clip_id, type="semantic", video_id=video_id)
 
 def streaming_process_video(video_graph, sample):
     """Process video segments at specified intervals with given fps.
@@ -78,6 +81,7 @@ def streaming_process_video(video_graph, sample):
     Returns:
         None: Updates video_graph in place with processed segments
     """
+    video_id = os.path.splitext(os.path.basename(sample["mem_path"]))[0] if sample.get("mem_path") else None
     clips = glob.glob(sample["clip_path"] + "/*")
     for clip_path in clips:
         clip_id = int(clip_path.split("/")[-1].split(".")[0])
@@ -92,9 +96,10 @@ def streaming_process_video(video_graph, sample):
                 base64_audio,
                 clip_id,
                 sample,
-                clip_path
+                clip_path,
+                video_id=video_id,
             )
-    
+
     video_graph.refresh_equivalences()
     with open(sample["mem_path"], "wb") as f:
         pickle.dump(video_graph, f)
@@ -102,12 +107,16 @@ def streaming_process_video(video_graph, sample):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_file", type=str, default="data/data.jsonl")
+    parser.add_argument("--token_file", type=str, default="data/results/token_consumption.json")
     args = parser.parse_args()
-    video_inputs = []
-    
+
+    monitor = get_monitor(args.token_file)
+    monitor.load(args.token_file)
+
     with open(args.data_file, "r") as f:
         for line in f:
             sample = json.loads(line)
             if not os.path.exists(sample["mem_path"]):
                 video_graph = VideoGraph(**memory_config)
                 streaming_process_video(video_graph, sample)
+                save_tokens(args.token_file)
