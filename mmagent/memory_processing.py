@@ -63,6 +63,17 @@ def parse_video_caption(video_graph, video_caption):
 def generate_video_context(
     base64_video, base64_frames, faces_list, voices_list, faces_input="face_only"
 ):
+    def sample_frames(frames, max_samples=6):
+        if not frames:
+            return []
+        if len(frames) <= max_samples:
+            return frames
+        if max_samples <= 1:
+            return [frames[0]]
+        step = (len(frames) - 1) / float(max_samples - 1)
+        indices = [int(round(i * step)) for i in range(max_samples)]
+        return [frames[i] for i in indices]
+
     face_frames = []
     face_only = []
 
@@ -143,20 +154,28 @@ def generate_video_context(
     if logging_level == "DETAIL" and num_voices > 0:
         logger.debug(f"Diarized dialogues: {voices_input}")
 
-    video_context = [
-        {
-            "type": "video_base64/mp4",
-            "content": base64_video.decode("utf-8"),
-        },
-        {
-            "type": "images/jpeg",
-            "content": faces_input,
-        },
-        {
-            "type": "text",
-            "content": json.dumps(voices_input),
-        }
-    ]
+    frame_samples = sample_frames(base64_frames)
+
+    video_context = []
+    if frame_samples:
+        video_context.append(
+            {
+                "type": "images/jpeg",
+                "content": frame_samples,
+            }
+        )
+    video_context.extend(
+        [
+            {
+                "type": "images/jpeg",
+                "content": faces_input,
+            },
+            {
+                "type": "text",
+                "content": json.dumps(voices_input),
+            },
+        ]
+    )
 
     return video_context
 

@@ -12,22 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-processing_config = json.load(open("configs/processing_config.json"))
-model = processing_config["model"]
-
 from . import chat_api
-try:
-    if model == "qwen2.5-omni":
-        from . import chat_qwen
-except:
-    pass
 from . import general
 from . import video_processing
 from . import video_verification
 
 __all__ = [
     "chat_api",
-    "chat_qwen" if model == "qwen2.5-omni" else None,
     "general",
     "video_processing",
     "video_verification",

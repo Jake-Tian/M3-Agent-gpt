@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Run full pipeline for questions.jsonl:
-# 1) Download video from HuggingFace (JakeTian/HippoVlog-video)
+# 1) Download video from HuggingFace (JakeTian/M3-web-video)
 # 2) Cut video into 30-second clips
-# 3) Generate intermediate outputs (faces, voices)
+# 3) Download intermediate outputs (faces, voices)
 # 4) Build memory graph
 # 5) Answer questions for this video
 # 6) Delete video, clips, intermediate_outputs, and .pkl to free storage
@@ -19,11 +19,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
-HF_DATASET="JakeTian/HippoVlog-video"
-QUESTIONS_FILE="data/annotations/questions.jsonl"
-RESULTS_FILE="data/results/questions.jsonl"
+HF_VIDEO_DATASET="JakeTian/M3-web-video"
+HF_INTERMEDIATE_DATASET="JakeTian/m3-intermediate-output"
+QUESTIONS_FILE="data/annotations/web.json"
+RESULTS_FILE="data/results/web.json"
 TOKEN_FILE="data/results/token_consumption.json"
 INTERVAL_SECONDS=30
+MAX_PARALLEL=5
 VIDEOS_DIR="data/videos/web"
 CLIPS_DIR="data/clips/web"
 INTERMEDIATE_DIR="data/intermediate_outputs/web"
@@ -45,7 +47,7 @@ import shutil
 import os
 try:
     path = hf_hub_download(
-        repo_id='$HF_DATASET',
+        repo_id='$HF_VIDEO_DATASET',
         filename='${video_id}.mp4',
         repo_type='dataset',
         local_dir='$VIDEOS_DIR',
@@ -68,7 +70,7 @@ except Exception as e:
   fi
   # Fallback: huggingface-cli
   if command -v huggingface-cli &>/dev/null; then
-    if huggingface-cli download "$HF_DATASET" "${video_id}.mp4" \
+    if huggingface-cli download "$HF_VIDEO_DATASET" "${video_id}.mp4" \
       --repo-type dataset \
       --local-dir "$VIDEOS_DIR" \
       --local-dir-use-symlinks False 2>/dev/null; then
@@ -85,6 +87,53 @@ except Exception as e:
     fi
   fi
   echo "  ✗ Download failed for ${video_id}. Install: pip install huggingface_hub"
+  return 1
+}
+
+download_intermediate_outputs() {
+  local video_id="$1"
+  local output_dir="${INTERMEDIATE_DIR}/${video_id}"
+  if [[ -d "$output_dir" && -n "$(ls -A "$output_dir" 2>/dev/null)" ]]; then
+    echo "  Intermediate outputs already exist, skipping download: $output_dir"
+    return 0
+  fi
+  echo "  Downloading intermediate outputs for ${video_id} from HuggingFace..."
+  if python3 -c "
+from huggingface_hub import snapshot_download
+import os
+import sys
+try:
+    snapshot_download(
+        repo_id='$HF_INTERMEDIATE_DATASET',
+        repo_type='dataset',
+        allow_patterns='${video_id}/**',
+        local_dir='$INTERMEDIATE_DIR',
+        local_dir_use_symlinks=False
+    )
+    if os.path.isdir('$output_dir') and os.listdir('$output_dir'):
+        sys.exit(0)
+except Exception as e:
+    print(f'Download error: {e}')
+    sys.exit(1)
+sys.exit(1)
+" 2>/dev/null; then
+    echo "  ✓ Downloaded intermediate outputs to $output_dir"
+    return 0
+  fi
+  # Fallback: huggingface-cli
+  if command -v huggingface-cli &>/dev/null; then
+    if huggingface-cli download "$HF_INTERMEDIATE_DATASET" \
+      --repo-type dataset \
+      --include "${video_id}/**" \
+      --local-dir "$INTERMEDIATE_DIR" \
+      --local-dir-use-symlinks False 2>/dev/null; then
+      if [[ -d "$output_dir" && -n "$(ls -A "$output_dir" 2>/dev/null)" ]]; then
+        echo "  ✓ Downloaded intermediate outputs to $output_dir"
+        return 0
+      fi
+    fi
+  fi
+  echo "  ✗ Intermediate outputs download failed for ${video_id}. Install: pip install huggingface_hub"
   return 1
 }
 
@@ -110,7 +159,22 @@ cut_video_into_clips() {
   for ((i = 0; i < segments; i++)); do
     local start=$((i * INTERVAL_SECONDS))
     local output="${clip_base}/${i}.mp4"
-    ffmpeg -y -ss $start -i "$input" -t $INTERVAL_SECONDS -c copy "$output" 2>/dev/null && true
+    local remaining=$((duration_seconds - start))
+    if [[ "$remaining" -le 0 ]]; then
+      continue
+    fi
+    local segment_duration=$INTERVAL_SECONDS
+    if [[ "$remaining" -lt "$INTERVAL_SECONDS" ]]; then
+      if [[ "$remaining" -lt 1 ]]; then
+        continue
+      fi
+      segment_duration=$remaining
+    fi
+    # Re-encode to avoid corrupted clips from keyframe cuts
+    ffmpeg -y -ss "$start" -i "$input" -t "$segment_duration" \
+      -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p \
+      -c:a aac -movflags +faststart \
+      "$output" 2>/dev/null && true
   done
   echo "  ✓ Clips saved to $clip_base"
   return 0
@@ -128,6 +192,7 @@ cleanup_video() {
 
 process_video() {
   local video_id="$1"
+  local token_file="data/results/token_consumption_${video_id}.json"
   echo ""
   echo "============================================================"
   echo "Processing video: ${video_id}"
@@ -151,10 +216,9 @@ process_video() {
   local intermediate_path="${INTERMEDIATE_DIR}/${video_id}"
   echo "{\"id\": \"${video_id}\", \"clip_path\": \"${clip_path}\", \"mem_path\": \"${mem_path}\", \"intermediate_outputs\": \"${intermediate_path}\"}" > "$data_file"
 
-  # Step 4: Generate intermediate outputs
-  echo "  Generating intermediate outputs..."
-  if ! python -m m3_agent.memorization_intermediate_outputs --data_file "$data_file"; then
-    echo "  ✗ Intermediate outputs failed for ${video_id}"
+  # Step 4: Download intermediate outputs
+  if ! download_intermediate_outputs "$video_id"; then
+    echo "  ✗ Intermediate outputs download failed for ${video_id}"
     rm -f "$data_file"
     cleanup_video "$video_id"
     return 1
@@ -162,7 +226,7 @@ process_video() {
 
   # Step 5: Build memory graph
   echo "  Building memory graph..."
-  if ! python -m m3_agent.memorization_memory_graphs --data_file "$data_file" --token_file "$TOKEN_FILE"; then
+  if ! python -m m3_agent.memorization_memory_graphs --data_file "$data_file" --token_file "$token_file"; then
     echo "  ✗ Memory graph failed for ${video_id}"
     rm -f "$data_file"
     cleanup_video "$video_id"
@@ -171,20 +235,27 @@ process_video() {
   rm -f "$data_file"
 
   # Step 6: Create filtered questions file and run control
-  local questions_filtered="data/annotations/questions_${video_id}.jsonl"
+  local questions_filtered="data/annotations/questions_${video_id}.json"
   python3 -c "
 import json
-with open('$QUESTIONS_FILE', 'r') as f:
-    lines = [l for l in f if l.strip()]
-with open('$questions_filtered', 'w') as f:
-    for line in lines:
-        item = json.loads(line)
-        if item.get('video_id') == '$video_id':
-            f.write(line)
+with open('$QUESTIONS_FILE', 'r', encoding='utf-8') as f:
+    data = json.load(f)
+filtered = {k: v for k, v in data.items() if k == '$video_id'}
+with open('$questions_filtered', 'w', encoding='utf-8') as f:
+    json.dump(filtered, f, ensure_ascii=False, indent=4)
+    f.write('\\n')
 " || true
 
   local question_count
-  question_count=$(wc -l < "$questions_filtered" 2>/dev/null || echo "0")
+  question_count=$(python3 -c "
+import json
+with open('$questions_filtered', 'r', encoding='utf-8') as f:
+    data = json.load(f)
+count = 0
+for _, v in data.items():
+    count += len(v.get('qa_list', []))
+print(count)
+" 2>/dev/null || echo "0")
   if [[ "$question_count" -eq 0 ]]; then
     echo "  No questions found for ${video_id}, skipping QA"
     cleanup_video "$video_id"
@@ -195,12 +266,7 @@ with open('$questions_filtered', 'w') as f:
   if python -m m3_agent.control \
     --data_file "$questions_filtered" \
     --mem_path_template "${MEM_DIR}/{video_id}.pkl" \
-    --token_file "$TOKEN_FILE"; then
-    # Append results to main results file
-    if [[ -f "data/results/questions_${video_id}.jsonl" ]]; then
-      cat "data/results/questions_${video_id}.jsonl" >> "$RESULTS_FILE"
-      rm -f "data/results/questions_${video_id}.jsonl"
-    fi
+    --token_file "$token_file"; then
     echo "  ✓ Answered questions for ${video_id}"
   else
     echo "  ✗ QA failed for ${video_id}"
@@ -251,15 +317,10 @@ else
   echo "Extracting unique video IDs from $QUESTIONS_FILE..."
   VIDEOS=($(python3 -c "
 import json
-seen = set()
-with open('$QUESTIONS_FILE', 'r') as f:
-    for line in f:
-        if line.strip():
-            item = json.loads(line)
-            vid = item.get('video_id')
-            if vid and vid not in seen:
-                seen.add(vid)
-                print(vid)
+with open('$QUESTIONS_FILE', 'r', encoding='utf-8') as f:
+    data = json.load(f)
+for vid in data.keys():
+    print(vid)
 " | tr '\n' ' '))
 fi
 
@@ -276,17 +337,62 @@ fi
 
 echo "Processing ${#VIDEOS[@]} video(s): ${VIDEOS[*]}"
 
-# Clear or init results file; init token file for fresh run
-: > "$RESULTS_FILE"
-echo '{"memory":{"total":0,"generation":0,"embedding":0,"by_video":{}},"control":{"total":0,"by_video":{}}}' > "$TOKEN_FILE"
-
-# Process each video
+# Process each video (parallel)
 FAILED=0
 for video_id in "${VIDEOS[@]}"; do
-  if ! process_video "$video_id"; then
+  while [[ $(jobs -pr | wc -l | tr -d ' ') -ge $MAX_PARALLEL ]]; do
+    if ! wait -n; then
+      ((FAILED++)) || true
+    fi
+  done
+  process_video "$video_id" &
+done
+
+while [[ $(jobs -pr | wc -l | tr -d ' ') -gt 0 ]]; do
+  if ! wait -n; then
     ((FAILED++)) || true
   fi
 done
+
+# Merge per-video results in original order
+: > "$RESULTS_FILE"
+for video_id in "${VIDEOS[@]}"; do
+  if [[ -f "data/results/questions_${video_id}.jsonl" ]]; then
+    cat "data/results/questions_${video_id}.jsonl" >> "$RESULTS_FILE"
+    rm -f "data/results/questions_${video_id}.jsonl"
+  fi
+done
+
+# Merge per-video token files
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+root = Path("data/results")
+out_path = root / "token_consumption.json"
+result = {
+    "memory": {"total": 0, "generation": 0, "embedding": 0, "by_video": {}},
+    "control": {"total": 0, "by_video": {}},
+}
+
+for token_file in sorted(root.glob("token_consumption_*.json")):
+    try:
+        data = json.loads(token_file.read_text(encoding="utf-8"))
+    except Exception:
+        continue
+    mem = data.get("memory", {})
+    ctl = data.get("control", {})
+    result["memory"]["total"] += mem.get("total", 0) or 0
+    result["memory"]["generation"] += mem.get("generation", 0) or 0
+    result["memory"]["embedding"] += mem.get("embedding", 0) or 0
+    result["control"]["total"] += ctl.get("total", 0) or 0
+    result["memory"]["by_video"].update(mem.get("by_video", {}) or {})
+    result["control"]["by_video"].update(ctl.get("by_video", {}) or {})
+
+out_path.write_text(json.dumps(result, ensure_ascii=False, indent=4) + "\n", encoding="utf-8")
+for token_file in root.glob("token_consumption_*.json"):
+    token_file.unlink(missing_ok=True)
+PY
 
 echo ""
 echo "============================================================"

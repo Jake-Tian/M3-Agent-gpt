@@ -43,6 +43,17 @@ logger = logging.getLogger(__name__)
 def generate_video_context(
     base64_frames, faces_list, voices_list, base64_video=None, faces_input="face_only"
 ):
+    def sample_frames(frames, max_samples=6):
+        if not frames:
+            return []
+        if len(frames) <= max_samples:
+            return frames
+        if max_samples <= 1:
+            return [frames[0]]
+        step = (len(frames) - 1) / float(max_samples - 1)
+        indices = [int(round(i * step)) for i in range(max_samples)]
+        return [frames[i] for i in indices]
+
     face_frames = []
     face_only = []
 
@@ -126,13 +137,17 @@ def generate_video_context(
     if logging_level == "DETAIL" and num_voices > 0:
         logger.debug(f"Diarized dialogues: {voices_input}")
 
-    # GPT cannot process audio; video is stripped of audio, speech content comes from voices_list (ASR transcriptions)
-    video_content = base64_video if isinstance(base64_video, str) else base64_video.decode("utf-8") if base64_video else None
+    # GPT cannot process audio; speech content comes from voices_list (ASR transcriptions)
+    frame_samples = sample_frames(base64_frames)
 
     video_context = [
         {
-            "type": "video_base64/mp4",
-            "content": video_content,
+            "type": "text",
+            "content": "Scene frames:",
+        },
+        {
+            "type": "images/jpeg",
+            "content": frame_samples,
         },
         {
             "type": "text",

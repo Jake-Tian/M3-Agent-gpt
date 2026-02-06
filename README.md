@@ -110,27 +110,9 @@ Prepare a jsonl file with one video per line saved in `data/data.jsonl`
 ```
 
 
-4. Generate Intermediate Outputs
+4. Intermediate Outputs
 
-   **This step uses Face Detection and Speaker Diarization tools to generate intermediate outputs.**
-
-   - If you want to use M3-Bench and have downloaded intermediate_outputs from huggingface, you can skip this step.
-
-   - Download audio embedding model and save into `models\` from [pretrained_eres2netv2.ckpt](https://www.modelscope.cn/models/iic/speech_eres2netv2_sv_zh-cn_16k-common/resolve/master/pretrained_eres2netv2.ckpt)
-
-   - Download [speakerlab](https://github.com/modelscope/3D-Speaker/tree/main/speakerlab)
-
-   ```
-   m3-agent
-   ├── models
-   │   └── pretrained_eres2netv2.ckpt
-   └── speakerlab
-   ```
-
-```bash
-python m3_agent/memorization_intermediate_outputs.py \
-   --data_file data/data.jsonl
-```
+   - Download intermediate outputs from Hugging Face for M3-Bench and place them in your `intermediate_path`.
 
 5. Generate Memory Graphs
 

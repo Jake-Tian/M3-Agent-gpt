@@ -94,7 +94,7 @@ def get_video_base64_without_audio(video_path):
 
 
 # TODO: check if there is a better way to do this without repeatedly opening and closing the video file
-def process_video_clip(video_path, fps=5, audio_fps=16000): 
+def process_video_clip(video_path, fps=1, audio_fps=16000): 
     try: 
         base64_data = {}
         video = VideoFileClip(video_path)
